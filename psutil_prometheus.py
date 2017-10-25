@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import http.server
+import os
 import threading
 import time
 
@@ -43,10 +44,19 @@ def metric_filter(val, keep):
 
 
 handlers = []
-# Some psutil calls require us to discard the first result
-psutil.cpu_times_percent()
 
+# Run queue load
+handlers.append(lambda: metric_str(os.getloadavg()[0], "load"))
+
+# Uptime
+def uptime():
+    with open('/proc/uptime', 'r') as f:
+        return metric_str(float(f.readline().split()[0]), "uptime")
+handlers.append(uptime)
+
+# Some psutil calls require us to discard the first result
 # CPU Stats
+psutil.cpu_times_percent()
 def cpu():
     parts = []
     for id, cpu in enumerate(psutil.cpu_times_percent(percpu=True)):
