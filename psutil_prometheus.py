@@ -73,6 +73,38 @@ class Metric(object):
         global ALL_METRICS
         ALL_METRICS.append(self)
 
+# GPU Metrics only work if NVML can be loaded
+class GPUMetric(Metric):
+    _NVMLInitAttempted = False
+    _NVMLInitSuccess = False
+
+    def __init__(self, *args, **kwargs):
+        super().__init__("gpu", "gpu statistics", gpu, ["id", "type"])
+
+    def __enter__(self):
+        super().__enter__()
+        if not self._NVMLInitAttempted:
+            self._NVMLInitAttempted = True
+            # Try to initialize NVML:
+            try:
+                nvmlInit()
+                self._NVMLInitSuccess = True
+            except NVMLError_LibraryNotFound:
+                self._NVMLInitSuccess = False
+        return self
+
+    def __exit__(self, *a):
+        if self._NVMLInitSuccess:
+            nvmlShutdown()
+        return super().__exit__(*a)
+    
+    def get(self):
+        if self._NVMLInitSuccess:
+            return super().get()
+        else:
+            return ["# WARNING `{}` not available; NVML not found.".format(self.name)]
+
+
 
 Metric("load", "one-minute average of run-queue length, the classic unix system load",
         lambda: os.getloadavg()[0]).register()
@@ -151,6 +183,18 @@ def netio():
             parts[k1] = {"sent": nic.bytes_sent, "recv": nic.bytes_recv}
     return parts
 Metric("network", "network i/o", netio, ["id", "type"], unit="bytes").register()
+
+# GPU Stats
+def gpu():
+    parts = []
+    for id, cpu in enumerate(psutil.cpu_times_percent(percpu=True)):
+        cpustat = {k: getattr(cpu, k) for k in ["user", "system", "idle", "iowait"]}
+        cpustat["allirq"] = cpu.irq + cpu.softirq
+        cpustat["other"] = cpu.nice + cpu.steal + cpu.guest + cpu.guest_nice
+        parts.append(cpustat)
+    return parts
+
+GPUMetric("gpu", "gpu performance metrics", gpu, ["id", "type"]).register()
 
 
 
