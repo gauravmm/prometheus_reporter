@@ -65,15 +65,16 @@ handlers.append(lambda: metric_str(psutil.cpu_stats(),
 def virtual_memory():
     vmem = psutil.virtual_memory()
     parts = {}
-    parts["percent"] = vmem.percent/100
+    parts["used"] = vmem.percent/100
     parts["cached"] = vmem.cached/vmem.total
     return metric_str(parts, "vmem", "type")
 handlers.append(virtual_memory)
 
 # Swap percentage
-handlers.append(lambda: metric_str(metric_filter(psutil.swap_memory(),
-                ["percent"]),
-                "swap", "type"))
+def swap():
+    swp = psutil.swap_memory()
+    return metric_str({"used": swp.percent}, "swap", "type")
+handlers.append(swap)
 
 # Disk usage and stats
 def disk():
