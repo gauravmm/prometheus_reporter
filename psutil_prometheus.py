@@ -4,59 +4,90 @@ import http.server
 import os
 import threading
 import time
+import contextlib
 
 import psutil
+from py3nvml.py3nvml import *
 
 PORT = 9110
 
-# Quick and dirty conversion from psutil data to prometheus input.
-def metric_str(stats, family, *args, **kwargs):
-    def _tostr(parts, val, axes):
+# Quick and dirty conversion from nested lists, dicts, or namedtuples to prometheus data.
+def _tostr(data, name, labels, **kwargs):
+    def _tostr_inner(parts, val, axes):
         rv=[]
         if isinstance(val, list):
             for i, v in enumerate(val):
-                rv.extend(_tostr(parts + ["{}=\"{}\"".format(axes[0], i)], v, axes[1:]))
+                rv.extend(_tostr_inner(parts + ["{}=\"{}\"".format(axes[0], i)], v, axes[1:]))
         elif hasattr(val, "_fields"):
             for k in val._fields:
-                rv.extend(_tostr(parts + ["{}=\"{}\"".format(axes[0], k)], getattr(val, k), axes[1:]))
+                rv.extend(_tostr_inner(parts + ["{}=\"{}\"".format(axes[0], k)], getattr(val, k), axes[1:]))
         elif isinstance(val, dict):
             for k, v in val.items():
-                rv.extend(_tostr(parts + ["{}=\"{}\"".format(axes[0], k)], v, axes[1:]))
+                rv.extend(_tostr_inner(parts + ["{}=\"{}\"".format(axes[0], k)], v, axes[1:]))
         else:
             if "fmt" in kwargs:
                 val = kwargs["fmt"](val)
 
             if parts:
-                return ["{}{{{}}} {}".format(family, ",".join(parts), val)]
+                return ["{}{{{}}} {}".format(name, ",".join(parts), val)]
             else:
-                return ["{} {}".format(family, val)]
+                return ["{} {}".format(name, val)]
         return rv
-    return _tostr([], stats, args)
+    return _tostr_inner([], data, labels)
 
-def metric_filter(val, keep):
-    if isinstance(val, list):
-        data = enumerate(val)
-    elif hasattr(val, "_fields"):
-        data = ((k, getattr(val, k)) for k in val._fields)
-    elif isinstance(val, dict):
-        data = val.items()
-    return {k: v for k, v in data if k in keep}
+global ALL_METRICS
+ALL_METRICS = []
+
+def not_implemented():
+    raise RuntimeError("Not Implemented!")
+
+class Metric(object):
+    def __init__(self, name, help, query=not_implemented, 
+                 labels=[], typ="gauge", fmt=lambda x: x, unit=None):
+        assert typ in ["gauge", "summary", "counter", "histogram"]
+
+        self.name = name
+        self.help = help
+        self.labels = labels
+        self.tostr = _tostr
+        self.typ = typ
+        self.query = query
+        self.unit = unit
+        self.fmt = fmt
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return None
+
+    def get(self):
+        rv = []
+        rv.append("# HELP {} {}".format(self.name, self.help))
+        rv.append("# TYPE {} {}".format(self.name, self.typ))
+        if self.unit is not None:
+            rv.append("# UNIT {} {}".format(self.name, self.unit))
+        return rv + self.tostr(self.query(), self.name, self.labels, fmt=self.fmt)
+
+    def register(self):
+        global ALL_METRICS
+        ALL_METRICS.append(self)
 
 
-handlers = []
+Metric("load", "one-minute average of run-queue length, the classic unix system load",
+        lambda: os.getloadavg()[0]).register()
 
-# Run queue load
-handlers.append(lambda: metric_str(os.getloadavg()[0], "load"))
 
 # Uptime
 def uptime():
     with open('/proc/uptime', 'r') as f:
-        return metric_str(float(f.readline().split()[0]), "uptime")
-handlers.append(uptime)
+        return float(f.readline().split()[0])
 
-# Some psutil calls require us to discard the first result
+Metric("uptime", "time since last boot",
+        uptime, unit="seconds").register()
+
+
 # CPU Stats
-psutil.cpu_times_percent()
 def cpu():
     parts = []
     for id, cpu in enumerate(psutil.cpu_times_percent(percpu=True)):
@@ -64,31 +95,40 @@ def cpu():
         cpustat["allirq"] = cpu.irq + cpu.softirq
         cpustat["other"] = cpu.nice + cpu.steal + cpu.guest + cpu.guest_nice
         parts.append(cpustat)
-    return metric_str(parts, "cpu", "id", "type", fmt=lambda x: x/100)
-handlers.append(cpu)
+    return parts
+
+class CPUMetric(Metric):
+    def __init__(self):
+        super().__init__("cpu", "cpu allocation", cpu, ["id", "type"], fmt=lambda x: x/100, unit="percent")
+
+    def __enter__(self):
+        # This psutil call requires us to discard the first result
+        psutil.cpu_times_percent()
+        return super().__enter__()
+
+CPUMetric().register()
+
 
 # Interrupts Stats
-handlers.append(lambda: metric_str(psutil.cpu_stats(),
-                "irq", "type"))
+Metric("irq", "number of interrupts", psutil.cpu_stats, ["type"], typ="counter").register()
+
 
 # Virtual Memory
 def virtual_memory():
     vmem = psutil.virtual_memory()
-    parts = {}
+    parts={}
     parts["used"] = vmem.percent/100
     parts["cached"] = vmem.cached/vmem.total
-    return metric_str(parts, "vmem", "type")
-handlers.append(virtual_memory)
+    return parts
+Metric("vmem", "virtual memory statistics", virtual_memory, ["type"], unit="percent").register()
 
 # Swap percentage
-def swap():
-    swp = psutil.swap_memory()
-    return metric_str({"used": swp.percent}, "swap", "type")
-handlers.append(swap)
+Metric("swap", "swap memory", lambda: {"used": psutil.swap_memory().percent}, ["type"], unit="percent").register()
+
 
 # Disk usage and stats
 def disk():
-    parts = {}
+    parts={}
     ioc = psutil.disk_io_counters(perdisk=True)
 
     for p in psutil.disk_partitions():
@@ -101,27 +141,40 @@ def disk():
             disk_stat["read_time"] = dioc.read_time/1000
             disk_stat["write_time"] = dioc.write_time/1000
             parts[p.mountpoint] = disk_stat
-    return metric_str(parts, "disk", "path", "type")
-handlers.append(disk)
+    return parts
+Metric("disk", "disk statistics", disk, ["path", "type"], unit="used=percent *_size=bytes *_time=seconds").register()
 
 def netio():
-    parts = {}
+    parts={}
     for k1, nic in psutil.net_io_counters(pernic=True).items():
         if k1 != "lo":
             parts[k1] = {"sent": nic.bytes_sent, "recv": nic.bytes_recv}
-    return metric_str(parts, "network", "id", "type")
-handlers.append(netio)
+    return parts
+Metric("network", "network i/o", netio, ["id", "type"], unit="bytes").register()
+
+
 
 class StatsPrintHandler(http.server.BaseHTTPRequestHandler):
+    def __init__(self, metrics, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.do_GET = lambda s: self.do_GET(metrics, s)
+
     def do_GET(s):
         s.send_response(200)
         s.send_header("Content-type", "text/plain")
         s.end_headers()
 
-        for h in handlers:
-            s.wfile.write("\n".join(h()).encode())
+        for m in metrics:
+            s.wfile.write("\n".join(m.get()).encode())
             s.wfile.write("\n".encode())
 
 if __name__ == "__main__":
-    with http.server.HTTPServer(("", PORT), StatsPrintHandler) as httpd:
-        httpd.serve_forever()
+    # Open context for all metrics:
+    try:
+        with contextlib.ExitStack() as metric_stack:
+            metrics = [metric_stack.enter_context(m) for m in ALL_METRICS]
+            with http.server.HTTPServer(("", PORT), lambda *a, **kwa: StatsPrintHandler(metrics, *a, **kwa)) as httpd:
+                httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("keyboard interrupt")
+        pass
