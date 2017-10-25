@@ -159,22 +159,54 @@ Metric("swap", "swap memory", lambda: {"used": psutil.swap_memory().percent}, ["
 
 
 # Disk usage and stats
-def disk():
-    parts={}
-    ioc = psutil.disk_io_counters(perdisk=True)
+def disk_meta(fn):
+    def _retfunc():
+        parts={}
+        ioc = psutil.disk_io_counters(perdisk=True)
 
-    for p in psutil.disk_partitions():
-        if p.mountpoint not in ["/boot"]:
-            disk_stat = {}
-            dioc = ioc[p.device[5:]]
-            disk_stat["used"] = psutil.disk_usage(p.mountpoint).percent/100
-            disk_stat["read_size"] = dioc.read_bytes/dioc.read_count
-            disk_stat["write_size"] = dioc.write_bytes/dioc.write_count
-            disk_stat["read_time"] = dioc.read_time/1000
-            disk_stat["write_time"] = dioc.write_time/1000
-            parts[p.mountpoint] = disk_stat
-    return parts
-Metric("disk", "disk statistics", disk, ["path", "type"], unit="used=percent *_size=bytes *_time=seconds").register()
+        for p in psutil.disk_partitions():
+            if p.mountpoint not in ["/boot"]:
+                parts[p.mountpoint] = fn(p, ioc[p.device[5:]])
+        return parts
+    return _retfunc
+
+disk_usage = disk_meta(lambda p, dioc: psutil.disk_usage(p.mountpoint).percent/100)
+Metric("disk_usage", "fraction of disk used", disk_usage, ["path"], unit="percent").register()
+
+class RunningDelta(object):
+    def __init__(self):
+        self.prev = 0
+    def __call__(self, x):
+        rv = x - self.prev
+        self.prev = x
+        return rv
+
+class DiskRequestSizer(object):
+    def __init__(self):
+        self.rbD = RunningDelta()
+        self.rcD = RunningDelta()
+        self.wbD = RunningDelta()
+        self.wcD = RunningDelta()
+    
+    def __call__(self, p, disk_io_count):
+        rv = {}
+        rb = self.rbD(disk_io_count.read_bytes)
+        rc = self.rcD(disk_io_count.read_count)
+        if rc > 0:
+            rv["read"] = rb/rc
+
+        wb = self.wbD(disk_io_count.write_bytes)
+        wc = self.wcD(disk_io_count.write_count)
+        if rc > 0:
+            rv["write"] = wb/wc
+
+        return rv
+
+disk_req_size = disk_meta(DiskRequestSizer())
+Metric("disk_req_size", "sliding-window average size of requests to the disk", disk_req_size, ["path", "direction"], typ="histogram", unit="bytes").register()
+
+disk_time = disk_meta(lambda p, dioc: {"read": dioc.read_time/1000, "write": dioc.write_time/1000})
+Metric("disk_time", "time spent waiting for disk to respond", disk_time, ["path", "direction"], unit="seconds").register()
 
 def netio():
     parts={}
@@ -186,16 +218,45 @@ Metric("network", "network i/o", netio, ["id", "type"], unit="bytes").register()
 
 # GPU Stats
 def gpu():
-    parts = []
-    for id, cpu in enumerate(psutil.cpu_times_percent(percpu=True)):
-        cpustat = {k: getattr(cpu, k) for k in ["user", "system", "idle", "iowait"]}
-        cpustat["allirq"] = cpu.irq + cpu.softirq
-        cpustat["other"] = cpu.nice + cpu.steal + cpu.guest + cpu.guest_nice
-        parts.append(cpustat)
+    parts = {}
+    for i in range(nvmlDeviceGetCount()):
+        handle = nvmlDeviceGetHandleByIndex(i)
+        # Get UUID:
+        id = str(nvmlDeviceGetUUID(handle))
+
+        # Gather stats:
+        p = {}
+        try:
+            memInfo = nvmlDeviceGetMemoryInfo(handle)
+            p["mem_used"] = str(memInfo.used / memInfo.total)
+
+            memBar1 = nvmlDeviceGetBAR1MemoryInfo(handle)
+            p["mem_mmap"] = str(memBar1.bar1Total / memInfo.total)
+            p["mem_mmap_used"] = str(memBar1.bar1Used / memBar1.bar1Total)
+        except NVMLError as err:
+            print("NVML error : memInfo")
+
+        try:
+            util = nvmlDeviceGetUtilizationRates(handle)
+            p["gpu_util"] = str(util.gpu/100)
+            p["mem_util"] = str(util.memory/100)
+        except NVMLError as err:
+            print("NVML error : device utilization")
+
+        try:
+            p["temp"] = str(nvmlDeviceGetTemperature(handle, NVML_TEMPERATURE_GPU))
+        except NVMLError as err:
+            print("NVML error : temperature")
+
+        try:
+            p["temp"] = str(nvmlDeviceGetTemperature(handle, NVML_TEMPERATURE_GPU))
+        except NVMLError as err:
+            print("NVML error : temperature")
+
+        parts[id] = p
     return parts
 
 GPUMetric("gpu", "gpu performance metrics", gpu, ["id", "type"]).register()
-
 
 
 class StatsPrintHandler(http.server.BaseHTTPRequestHandler):
