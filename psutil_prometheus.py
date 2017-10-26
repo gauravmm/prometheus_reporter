@@ -288,7 +288,10 @@ class GPUMetric(Metric):
     
     def get(self):
         if self._NVMLInitSuccess:
-            return super().get()
+            try:
+                return super().get()
+            except Exception as e:
+                return ["# exception occurred while processing:", "# {}".format(e)]
         else:
             return ["# WARNING `{}` not available; NVML not found.".format(self.name)]
 
@@ -310,9 +313,9 @@ class GPUMeta(object):
                 id = str(nvmlDeviceGetUUID(handle))
                 self._id_handles.append((id, handle))
         try:
-            return {id: self.fn(h) for id, h in handles}
+            return {id: self.fn(h) for id, h in self._id_handles}
         except:
-            return []
+            raise
 
 
 def gpu_mem(handle):
