@@ -79,7 +79,7 @@ class GPUMetric(Metric):
     _NVMLInitSuccess = False
 
     def __init__(self, *args, **kwargs):
-        super().__init__("gpu", "gpu statistics", gpu, ["id", "type"])
+        super().__init__(*args, **kwargs)
 
     def __enter__(self):
         super().__enter__()
@@ -217,46 +217,106 @@ def netio():
 Metric("network", "network i/o", netio, ["id", "type"], unit="bytes").register()
 
 # GPU Stats
-def gpu():
-    parts = {}
-    for i in range(nvmlDeviceGetCount()):
-        handle = nvmlDeviceGetHandleByIndex(i)
-        # Get UUID:
-        id = str(nvmlDeviceGetUUID(handle))
+class GPUMeta(object):
+    # Only open one handle, and share that across all accesses.
+    _init = False
+    _id_handles = []
 
-        # Gather stats:
-        p = {}
+    def __init__(self, innerfunc):
+        self.fn = innerfunc
+
+    def __call__(self):
+        if not self._init:
+            self._init = True
+            for i in range(nvmlDeviceGetCount()):
+                handle = nvmlDeviceGetHandleByIndex(i)
+                id = str(nvmlDeviceGetUUID(handle))
+                self._id_handles.append(id, handle)
         try:
-            memInfo = nvmlDeviceGetMemoryInfo(handle)
-            p["mem_used"] = str(memInfo.used / memInfo.total)
+            return {id: self.fn(h) for id, h in handles}
+        except:
+            return []
 
-            memBar1 = nvmlDeviceGetBAR1MemoryInfo(handle)
-            p["mem_mmap"] = str(memBar1.bar1Total / memInfo.total)
-            p["mem_mmap_used"] = str(memBar1.bar1Used / memBar1.bar1Total)
-        except NVMLError as err:
-            print("NVML error : memInfo")
 
+def gpu_mem(handle):
+    p = {}
+    memInfo = nvmlDeviceGetMemoryInfo(handle)
+    p["used"] = memInfo.used / memInfo.total
+
+    memBar1 = nvmlDeviceGetBAR1MemoryInfo(handle)
+    p["mmap"] = str(memBar1.bar1Total / memInfo.total)
+    p["mmap_used"] = str(memBar1.bar1Used / memBar1.bar1Total)
+    return p
+
+GPUMetric("gpu_mem", "memory used and mapped", GPUMeta(gpu_mem), ["id", "type"], unit="percent").register()
+
+
+def gpu_util(handle):
+    util = nvmlDeviceGetUtilizationRates(handle)
+    return {"gpu": util.gpu/100, "mem": util.memory/100}
+
+GPUMetric("gpu_util", "time busy in the last second", GPUMeta(gpu_util), ["id", "type"], unit="percent").register()
+
+
+def gpu_temp(handle):
+    return str(nvmlDeviceGetTemperature(handle, NVML_TEMPERATURE_GPU))
+
+GPUMetric("gpu_temp", "gpu die temperature", GPUMeta(gpu_temp), ["id"], unit="celsius").register()
+
+
+def gpu_power(handle):
+    return str(nvmlDeviceGetPowerUsage(handle))/1000
+
+GPUMetric("gpu_power", "power draw", GPUMeta(gpu_power), ["id"], unit="watts").register()
+
+
+def gpu_clocks(handle):
+    return {
+        "gfx": nvmlDeviceGetClockInfo(handle, NVML_CLOCK_GRAPHICS),
+        "sm": nvmlDeviceGetClockInfo(handle, NVML_CLOCK_SM),
+        "mem": nvmlDeviceGetClockInfo(handle, NVML_CLOCK_MEM)
+    }
+
+GPUMetric("gpu_clocks", "clock speed for each component", GPUMeta(gpu_power), ["id"], unit="megahertz").register()
+
+
+THROTTLE_REASONS = [
+    (nvmlClocksThrottleReasonGpuIdle,           "gpu_idle"),
+    (nvmlClocksThrottleReasonUserDefinedClocks, "user_set"),
+    (nvmlClocksThrottleReasonApplicationsClocksSetting, "app_set"),
+    (nvmlClocksThrottleReasonSwPowerCap,        "sw_power_cap"),
+    (nvmlClocksThrottleReasonHwSlowdown,        "hw_slowdown"),
+    (nvmlClocksThrottleReasonUnknown,           "unknown")]
+
+def gpu_throttle(handle):
+    supportedClocksThrottleReasons = nvmlDeviceGetSupportedClocksThrottleReasons(handle);
+    clocksThrottleReasons = nvmlDeviceGetCurrentClocksThrottleReasons(handle);
+    return {name: 1 if (mask & clocksThrottleReasons) else 0 for mask, name in THROTTLE_REASONS if (mask & supportedClocksThrottleReasons)}
+
+GPUMetric("gpu_throttle", "reason for throttling", GPUMeta(gpu_throttle), ["id", "reason"], unit="boolean").register()
+
+
+# For future implementation: GPU user tracking
+"""
+    procs = nvmlDeviceGetComputeRunningProcesses(handle)
+
+    for p in procs:
         try:
-            util = nvmlDeviceGetUtilizationRates(handle)
-            p["gpu_util"] = str(util.gpu/100)
-            p["mem_util"] = str(util.memory/100)
+            name = str(nvmlSystemGetProcessName(p.pid))
         except NVMLError as err:
-            print("NVML error : device utilization")
+            if (err.value == NVML_ERROR_NOT_FOUND):
+                # probably went away
+                continue
+            else:
+                name = handleError(err)
 
-        try:
-            p["temp"] = str(nvmlDeviceGetTemperature(handle, NVML_TEMPERATURE_GPU))
-        except NVMLError as err:
-            print("NVML error : temperature")
+        if (p.usedGpuMemory == None):
+            mem = 'N\A'
+        else:
+            mem = '%d MiB' % (p.usedGpuMemory / 1024 / 1024)
+        strResult += '      <used_memory>' + mem + '</used_memory>\n'
+"""
 
-        try:
-            p["temp"] = str(nvmlDeviceGetTemperature(handle, NVML_TEMPERATURE_GPU))
-        except NVMLError as err:
-            print("NVML error : temperature")
-
-        parts[id] = p
-    return parts
-
-GPUMetric("gpu", "gpu performance metrics", gpu, ["id", "type"]).register()
 
 
 class StatsPrintHandler(http.server.BaseHTTPRequestHandler):
