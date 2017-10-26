@@ -5,6 +5,7 @@ import os
 import threading
 import time
 import contextlib
+import sensors
 
 import psutil
 from py3nvml.py3nvml import *
@@ -72,38 +73,6 @@ class Metric(object):
     def register(self):
         global ALL_METRICS
         ALL_METRICS.append(self)
-
-# GPU Metrics only work if NVML can be loaded
-class GPUMetric(Metric):
-    _NVMLInitAttempted = False
-    _NVMLInitSuccess = False
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def __enter__(self):
-        super().__enter__()
-        if not self._NVMLInitAttempted:
-            self._NVMLInitAttempted = True
-            # Try to initialize NVML:
-            try:
-                nvmlInit()
-                self._NVMLInitSuccess = True
-            except NVMLError_LibraryNotFound:
-                self._NVMLInitSuccess = False
-        return self
-
-    def __exit__(self, *a):
-        if self._NVMLInitSuccess:
-            nvmlShutdown()
-        return super().__exit__(*a)
-    
-    def get(self):
-        if self._NVMLInitSuccess:
-            return super().get()
-        else:
-            return ["# WARNING `{}` not available; NVML not found.".format(self.name)]
-
 
 
 Metric("load", "one-minute average of run-queue length, the classic unix system load",
@@ -216,7 +185,115 @@ def netio():
     return parts
 Metric("network", "network i/o", netio, ["id", "type"], unit="bytes").register()
 
+
+#
+# Sensors stats
+#
+
+# Sensors metrics require sensors to be loaded and unloaded.
+# We do some simple reference counting to make sure that we load only once and unload cleanly
+class SensorMetric(Metric):
+    _initAttempted = False
+    _initSuccess = None
+    _initCount = 0
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def __enter__(self):
+        super().__enter__()
+        if not self._initAttempted:
+            self._initAttempted = True
+            try:
+                sensors.init()
+                self._initSuccess = True
+            except:
+                self._initSuccess = False
+
+        if self._initSuccess:
+            self._initCount += 1
+        return self
+
+    def __exit__(self, *a):
+        if self._initSuccess:
+            self._initCount -= 1
+            if self._initCount == 0:
+                # Last one out, get the lights.
+                sensors.cleanup()
+
+        return super().__exit__(*a)
+    
+    def get(self):
+        if self._initSuccess:
+            return super().get()
+        else:
+            return ["# WARNING `{}` not available; Error when loading lm-sensors".format(self.name)]
+
+
+def sanitizeName(name):
+    return name.lower().replace(" ", "_")
+
+def coretemp():
+    rv = {}
+    for chip in sensors.ChipIterator("coretemp-*"):
+        chipname = sensors.chip_snprintf_name(chip)
+
+        chipdata = {}
+        for feature in sensors.FeatureIterator(chip):
+            label = sensors.get_label(chip, feature)
+
+            sfs = list(sensors.SubFeatureIterator(chip, feature)) # get a list of all subfeatures
+            vals = [sensors.get_value(chip, sf.number) for sf in sfs]
+            names = [sf.name[len(feature.name)+1:].decode("utf-8") for sf in sfs]
+
+            data = dict(zip(names, vals))
+            # We use the label instead of the name because the name is typically unhelpful.
+            chipdata[sanitizeName(label)] = data["input"]
+        
+        rv[chipname] = chipdata
+    
+    return rv
+
+SensorMetric("coretemp", "temperature sensors", coretemp, ["chip", "feature"], unit="celsius").register()
+
+
+#
 # GPU Stats
+#
+
+# GPU Metrics only work if NVML can be loaded
+class GPUMetric(Metric):
+    _NVMLInitAttempted = False
+    _NVMLInitSuccess = False
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def __enter__(self):
+        super().__enter__()
+        if not self._NVMLInitAttempted:
+            self._NVMLInitAttempted = True
+            # Try to initialize NVML:
+            try:
+                nvmlInit()
+                self._NVMLInitSuccess = True
+            except NVMLError_LibraryNotFound:
+                self._NVMLInitSuccess = False
+        return self
+
+    def __exit__(self, *a):
+        if self._NVMLInitSuccess:
+            nvmlShutdown()
+        return super().__exit__(*a)
+    
+    def get(self):
+        if self._NVMLInitSuccess:
+            return super().get()
+        else:
+            return ["# WARNING `{}` not available; NVML not found.".format(self.name)]
+
+
+
 class GPUMeta(object):
     # Only open one handle, and share that across all accesses.
     _init = False
