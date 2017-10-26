@@ -308,7 +308,7 @@ class GPUMeta(object):
             for i in range(nvmlDeviceGetCount()):
                 handle = nvmlDeviceGetHandleByIndex(i)
                 id = str(nvmlDeviceGetUUID(handle))
-                self._id_handles.append(id, handle)
+                self._id_handles.append((id, handle))
         try:
             return {id: self.fn(h) for id, h in handles}
         except:
@@ -415,8 +415,13 @@ if __name__ == "__main__":
     try:
         with contextlib.ExitStack() as metric_stack:
             metrics = [metric_stack.enter_context(m) for m in ALL_METRICS]
-            with http.server.HTTPServer(("", PORT), lambda *a, **kwa: StatsPrintHandler(metrics, *a, **kwa)) as httpd:
+
+            # Because of a weird bug with Python 3.5, try-with-resources and http.server don't play nice. We do that manually:
+            httpd = http.server.HTTPServer(("", PORT), lambda *a, **kwa: StatsPrintHandler(metrics, *a, **kwa))
+            try:
                 httpd.serve_forever()
+            except:
+                httpd.__exit__(None, None, None)
     except KeyboardInterrupt:
         print("keyboard interrupt")
         pass
