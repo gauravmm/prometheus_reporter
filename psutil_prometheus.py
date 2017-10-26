@@ -291,7 +291,7 @@ class GPUMetric(Metric):
             try:
                 return super().get()
             except Exception as e:
-                return ["# exception occurred while processing:", "# {}".format(e)]
+                return ["# EXCEPTION while processing {}".format(self.name), "# {}".format(e)]
         else:
             return ["# WARNING `{}` not available; NVML not found.".format(self.name)]
 
