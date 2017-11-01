@@ -134,7 +134,7 @@ def disk_meta(fn):
         ioc = psutil.disk_io_counters(perdisk=True)
 
         for p in psutil.disk_partitions():
-            if p.mountpoint not in ["/boot"]:
+            if p.mountpoint not in ["/boot"] and p.mountpoint in parts:
                 parts[p.mountpoint] = fn(p, ioc[p.device[5:]])
         return parts
     return _retfunc
