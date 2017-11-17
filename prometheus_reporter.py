@@ -345,7 +345,7 @@ GPUMetric("gpu_temp", "gpu die temperature", GPUMeta(gpu_temp), ["id"], unit="ce
 
 
 def gpu_power(handle):
-    return str(nvmlDeviceGetPowerUsage(handle))/1000
+    return str(nvmlDeviceGetPowerUsage(handle)/1000)
 
 GPUMetric("gpu_power", "power draw", GPUMeta(gpu_power), ["id"], unit="watts").register()
 
@@ -357,7 +357,7 @@ def gpu_clocks(handle):
         "mem": nvmlDeviceGetClockInfo(handle, NVML_CLOCK_MEM)
     }
 
-GPUMetric("gpu_clocks", "clock speed for each component", GPUMeta(gpu_power), ["id"], unit="megahertz").register()
+GPUMetric("gpu_clocks", "clock speed for each component", GPUMeta(gpu_clocks), ["id", "type"], unit="megahertz").register()
 
 
 THROTTLE_REASONS = [
