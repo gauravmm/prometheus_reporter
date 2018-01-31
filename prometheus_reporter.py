@@ -235,7 +235,7 @@ def sanitizeName(name):
 
 def coretemp():
     rv = {}
-    for chip in sensors.ChipIterator("coretemp-*"):
+    for chip in sensors.ChipIterator("*temp-*"):
         chipname = sensors.chip_snprintf_name(chip)
 
         chipdata = {}
