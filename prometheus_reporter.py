@@ -235,8 +235,10 @@ def sanitizeName(name):
 
 def coretemp():
     rv = {}
-    for chip in sensors.ChipIterator("*temp-*"):
+    for chip in sensors.ChipIterator():
         chipname = sensors.chip_snprintf_name(chip)
+        if "temp" not in chipname:
+            continue
 
         chipdata = {}
         for feature in sensors.FeatureIterator(chip):
