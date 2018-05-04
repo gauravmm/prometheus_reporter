@@ -369,8 +369,8 @@ THROTTLE_REASONS = [
     (nvmlClocksThrottleReasonUnknown,           "unknown")]
 
 def gpu_throttle(handle):
-    supportedClocksThrottleReasons = nvmlDeviceGetSupportedClocksThrottleReasons(handle);
-    clocksThrottleReasons = nvmlDeviceGetCurrentClocksThrottleReasons(handle);
+    supportedClocksThrottleReasons = nvmlDeviceGetSupportedClocksThrottleReasons(handle)
+    clocksThrottleReasons = nvmlDeviceGetCurrentClocksThrottleReasons(handle)
     return {name: 1 if (mask & clocksThrottleReasons) else 0 for mask, name in THROTTLE_REASONS if (mask & supportedClocksThrottleReasons)}
 
 GPUMetric("gpu_throttle", "reason for throttling", GPUMeta(gpu_throttle), ["id", "reason"], unit="boolean").register()
