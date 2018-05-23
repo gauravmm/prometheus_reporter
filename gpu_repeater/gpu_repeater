@@ -1,0 +1,5 @@
+#!/bin/bash
+source /home/serverbot/templates/config.sh
+
+# Run this once you have the BOT_ID:
+python3 /opt/gpu_repeater/repeater.py
