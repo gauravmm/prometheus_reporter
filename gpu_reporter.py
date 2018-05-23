@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 
 import contextlib
+import datetime
 import http.server
 import json
 import os
 import threading
 import time
 
-from prometheus_reporter import (gpu_mem, gpu_throttle, gpu_util)
+import psutil
+from prometheus_reporter import gpu_mem, gpu_throttle, gpu_util
 from py3nvml.py3nvml import *
 
 PORT = 9212
@@ -37,35 +39,36 @@ class GPUMultiMeta(object):
         for id, h in self._id_handles:
             entry = {}
             for ifunc in self._fns:
-                for k, v in ifunc(h).items():
-                    assert k not in entry
-                    entry[k] = v
+                entry[ifunc.__name__] = ifunc(h)
             rv[id] = entry
         return rv
 
+def gpu_procs(handle):
+    now = datetime.datetime.now()
 
-# For future implementation: GPU user tracking
-"""
     procs = nvmlDeviceGetComputeRunningProcesses(handle)
 
+    rv = []
     for p in procs:
+        pid = p.pid
+
         try:
-            name = str(nvmlSystemGetProcessName(p.pid))
-        except NVMLError as err:
-            if (err.value == NVML_ERROR_NOT_FOUND):
-                # probably went away
-                continue
-            else:
-                name = handleError(err)
+            mem = 0 if p.usedGpuMemory == None else p.usedGpuMemory
 
-        if (p.usedGpuMemory == None):
-            mem = 'N\A'
-        else:
-            mem = '%d MiB' % (p.usedGpuMemory / 1024 / 1024)
-        strResult += '      <used_memory>' + mem + '</used_memory>\n'
-"""
+            # Check the user owning this process.
+            proc = psutil.Process(pid=pid)
+            pinfo = proc.as_dict(attrs=['pid', 'cmdline', 'name', 'username', 'create_time'])
+            pinfo["gpu_mem"] = mem
 
-_gpu_meta = GPUMultiMeta([gpu_mem, gpu_throttle, gpu_util])
+            # Update the cache:
+            rv.append(pinfo)
+        except:
+            pass
+
+    return rv
+
+
+_gpu_meta = GPUMultiMeta([gpu_mem, gpu_throttle, gpu_util, gpu_procs])
 
 class GPUReporter(http.server.BaseHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -73,7 +76,7 @@ class GPUReporter(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-type", "text/plain")
+        self.send_header("Content-type", "application/json")
         self.end_headers()
 
         self.wfile.write(json.dumps(_gpu_meta()).encode())
