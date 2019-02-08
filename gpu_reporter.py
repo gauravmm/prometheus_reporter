@@ -57,7 +57,7 @@ def gpu_procs(handle):
 
             # Check the user owning this process.
             proc = psutil.Process(pid=pid)
-            pinfo = proc.as_dict(attrs=['pid', 'cmdline', 'name', 'username', 'create_time'])
+            pinfo = proc.as_dict(attrs=['pid', 'cmdline', 'name', 'username', 'create_time', 'cwd'])
             pinfo["gpu_mem"] = mem
 
             # Update the cache:
